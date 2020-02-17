@@ -90,7 +90,8 @@ func fstatat(t *kernel.Task, dirfd int32, pathAddr, statAddr usermem.Addr, flags
 				}
 				var stat linux.Stat
 				convertStatxToUserStat(t, &statx, &stat)
-				return stat.CopyOut(t, statAddr)
+				_, err = stat.CopyOut(t, statAddr)
+				return err
 			}
 			start = dirfile.VirtualDentry()
 			start.IncRef()
@@ -110,7 +111,8 @@ func fstatat(t *kernel.Task, dirfd int32, pathAddr, statAddr usermem.Addr, flags
 	}
 	var stat linux.Stat
 	convertStatxToUserStat(t, &statx, &stat)
-	return stat.CopyOut(t, statAddr)
+	_, err = stat.CopyOut(t, statAddr)
+	return err
 }
 
 func timespecFromStatxTimestamp(sxts linux.StatxTimestamp) linux.Timespec {
@@ -139,7 +141,8 @@ func Fstat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 	}
 	var stat linux.Stat
 	convertStatxToUserStat(t, &statx, &stat)
-	return 0, nil, stat.CopyOut(t, statAddr)
+	_, err = stat.CopyOut(t, statAddr)
+	return 0, nil, err
 }
 
 // Statx implements Linux syscall statx(2).
@@ -194,7 +197,8 @@ func Statx(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 					return 0, nil, err
 				}
 				userifyStatx(t, &statx)
-				return 0, nil, statx.CopyOut(t, statxAddr)
+				_, err = statx.CopyOut(t, statxAddr)
+				return 0, nil, err
 			}
 			start = dirfile.VirtualDentry()
 			start.IncRef()
@@ -213,7 +217,8 @@ func Statx(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 		return 0, nil, err
 	}
 	userifyStatx(t, &statx)
-	return 0, nil, statx.CopyOut(t, statxAddr)
+	_, err = statx.CopyOut(t, statxAddr)
+	return 0, nil, err
 }
 
 func userifyStatx(t *kernel.Task, statx *linux.Statx) {
@@ -353,8 +358,8 @@ func Statfs(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 	if err != nil {
 		return 0, nil, err
 	}
-
-	return 0, nil, statfs.CopyOut(t, bufAddr)
+	_, err = statfs.CopyOut(t, bufAddr)
+	return 0, nil, err
 }
 
 // Fstatfs implements Linux syscall fstatfs(2).
@@ -372,6 +377,6 @@ func Fstatfs(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysca
 	if err != nil {
 		return 0, nil, err
 	}
-
-	return 0, nil, statfs.CopyOut(t, bufAddr)
+	_, err = statfs.CopyOut(t, bufAddr)
+	return 0, nil, err
 }
