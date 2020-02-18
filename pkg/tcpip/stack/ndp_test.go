@@ -1831,7 +1831,7 @@ func stackAndNdpDispatcherWithDefaultRoute(t *testing.T, nicID tcpip.NICID) (*nd
 		Gateway:     llAddr3,
 		NIC:         nicID,
 	}})
-	s.AddLinkAddress(nicID, llAddr3, linkAddr3)
+	s.AddStaticNeighbor(nicID, llAddr3, linkAddr3)
 	return ndpDisp, e, s
 }
 

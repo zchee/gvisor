@@ -185,7 +185,7 @@ func (e *endpoint) handleICMP(r *stack.Route, netHeader buffer.View, pkt tcpip.P
 		// rxNICID so the packet is processed as defined in RFC 4861,
 		// as per RFC 4862 section 5.4.3.
 
-		if e.linkAddrCache.CheckLocalAddress(e.nicID, ProtocolNumber, targetAddr) == 0 {
+		if s.CheckLocalAddress(e.nicID, ProtocolNumber, targetAddr) == 0 {
 			// We don't have a useful answer; the best we can do is ignore the request.
 			return
 		}
@@ -207,7 +207,7 @@ func (e *endpoint) handleICMP(r *stack.Route, netHeader buffer.View, pkt tcpip.P
 
 			switch opt := opt.(type) {
 			case header.NDPSourceLinkLayerAddressOption:
-				e.linkAddrCache.AddLinkAddress(e.nicID, r.RemoteAddress, opt.EthernetAddress())
+				e.nud.HandleProbe(r.RemoteAddress, r.LocalAddress, header.IPv6ProtocolNumber, opt.EthernetAddress())
 			}
 		}
 
@@ -314,7 +314,11 @@ func (e *endpoint) handleICMP(r *stack.Route, netHeader buffer.View, pkt tcpip.P
 
 			switch opt := opt.(type) {
 			case header.NDPTargetLinkLayerAddressOption:
-				e.linkAddrCache.AddLinkAddress(e.nicID, targetAddr, opt.EthernetAddress())
+				solicited := na.SolicitedFlag()
+				override := na.OverrideFlag()
+				isRouter := na.RouterFlag()
+
+				e.nud.HandleConfirmation(targetAddr, opt.EthernetAddress(), solicited, override, isRouter)
 			}
 		}
 
@@ -432,7 +436,7 @@ func (*protocol) LinkAddressProtocol() tcpip.NetworkProtocolNumber {
 }
 
 // LinkAddressRequest implements stack.LinkAddressResolver.
-func (*protocol) LinkAddressRequest(addr, localAddr tcpip.Address, linkEP stack.LinkEndpoint) *tcpip.Error {
+func (*protocol) LinkAddressRequest(addr, localAddr tcpip.Address, linkAddr tcpip.LinkAddress, linkEP stack.LinkEndpoint) *tcpip.Error {
 	snaddr := header.SolicitedNodeAddr(addr)
 
 	// TODO(b/148672031): Use stack.FindRoute instead of manually creating the
@@ -443,6 +447,10 @@ func (*protocol) LinkAddressRequest(addr, localAddr tcpip.Address, linkEP stack.
 		RemoteAddress:     snaddr,
 		RemoteLinkAddress: header.EthernetAddressFromMulticastIPv6Address(snaddr),
 	}
+	if linkAddr != "" {
+		r.RemoteLinkAddress = linkAddr
+	}
+
 	hdr := buffer.NewPrependable(int(linkEP.MaxHeaderLength()) + header.IPv6MinimumSize + header.ICMPv6NeighborAdvertSize)
 	pkt := header.ICMPv6(hdr.Prepend(header.ICMPv6NeighborAdvertSize))
 	pkt.SetType(header.ICMPv6NeighborSolicit)

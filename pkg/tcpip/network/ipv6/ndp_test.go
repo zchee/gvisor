@@ -62,7 +62,7 @@ func setupStackAndEndpoint(t *testing.T, llladdr, rlladdr tcpip.Address) (*stack
 		t.Fatalf("cannot find protocol instance for network protocol %d", ProtocolNumber)
 	}
 
-	ep, err := netProto.NewEndpoint(0, tcpip.AddressWithPrefix{rlladdr, netProto.DefaultPrefixLen()}, &stubLinkAddressCache{}, &stubDispatcher{}, nil, s)
+	ep, err := netProto.NewEndpoint(0, tcpip.AddressWithPrefix{rlladdr, netProto.DefaultPrefixLen()}, &stubNUDHandler{}, &stubDispatcher{}, nil, s)
 	if err != nil {
 		t.Fatalf("NewEndpoint(_) = _, %s, want = _, nil", err)
 	}
@@ -139,17 +139,24 @@ func TestNeighorSolicitationWithSourceLinkLayerOption(t *testing.T) {
 				Data: hdr.View().ToVectorisedView(),
 			})
 
-			linkAddr, c, err := s.GetLinkAddress(nicID, lladdr1, lladdr0, ProtocolNumber, nil)
-			if linkAddr != test.expectedLinkAddr {
-				t.Errorf("got link address = %s, want = %s", linkAddr, test.expectedLinkAddr)
+			var neigh stack.NeighborEntry
+			neighbors, err := s.Neighbors(nicID)
+			if err != nil {
+				t.Errorf("s.Neighbors(%d): %v", nicID, err)
+			}
+			for _, n := range neighbors {
+				if n.Addr == lladdr1 {
+					neigh = n
+				}
+			}
+
+			if neigh.LinkAddr != test.expectedLinkAddr {
+				t.Errorf("got link address = %s, want = %s", neigh.LinkAddr, test.expectedLinkAddr)
 			}
 
 			if test.expectedLinkAddr != "" {
-				if err != nil {
-					t.Errorf("s.GetLinkAddress(%d, %s, %s, %d, nil): %s", nicID, lladdr1, lladdr0, ProtocolNumber, err)
-				}
-				if c != nil {
-					t.Errorf("got unexpected channel")
+				if neigh.State != stack.Stale {
+					t.Errorf("got NUD state = %s, want = stale", neigh.State)
 				}
 
 				// Invalid count should not have increased.
@@ -157,13 +164,6 @@ func TestNeighorSolicitationWithSourceLinkLayerOption(t *testing.T) {
 					t.Errorf("got invalid = %d, want = 0", got)
 				}
 			} else {
-				if err != tcpip.ErrWouldBlock {
-					t.Errorf("got s.GetLinkAddress(%d, %s, %s, %d, nil) = (_, _, %v), want = (_, _, %s)", nicID, lladdr1, lladdr0, ProtocolNumber, err, tcpip.ErrWouldBlock)
-				}
-				if c == nil {
-					t.Errorf("expected channel from call to s.GetLinkAddress(%d, %s, %s, %d, nil)", nicID, lladdr1, lladdr0, ProtocolNumber)
-				}
-
 				// Invalid count should have increased.
 				if got := invalid.Value(); got != 1 {
 					t.Errorf("got invalid = %d, want = 1", got)
@@ -174,20 +174,21 @@ func TestNeighorSolicitationWithSourceLinkLayerOption(t *testing.T) {
 }
 
 // TestNeighorAdvertisementWithTargetLinkLayerOption tests that receiving a
-// valid NDP NA message with the Target Link Layer Address option results in a
-// new entry in the link address cache for the target of the message.
+// valid NDP NA message with the Target Link Layer Address option does not
+// results in a new entry in the link address cache for the target of the
+// message.
 func TestNeighorAdvertisementWithTargetLinkLayerOption(t *testing.T) {
 	const nicID = 1
 
 	tests := []struct {
-		name             string
-		optsBuf          []byte
-		expectedLinkAddr tcpip.LinkAddress
+		name    string
+		optsBuf []byte
+		valid   bool
 	}{
 		{
-			name:             "Valid",
-			optsBuf:          []byte{2, 1, 2, 3, 4, 5, 6, 7},
-			expectedLinkAddr: "\x02\x03\x04\x05\x06\x07",
+			name:    "Valid",
+			optsBuf: []byte{2, 1, 2, 3, 4, 5, 6, 7},
+			valid:   true,
 		},
 		{
 			name:    "Too Small",
@@ -242,31 +243,22 @@ func TestNeighorAdvertisementWithTargetLinkLayerOption(t *testing.T) {
 				Data: hdr.View().ToVectorisedView(),
 			})
 
-			linkAddr, c, err := s.GetLinkAddress(nicID, lladdr1, lladdr0, ProtocolNumber, nil)
-			if linkAddr != test.expectedLinkAddr {
-				t.Errorf("got link address = %s, want = %s", linkAddr, test.expectedLinkAddr)
+			neighbors, err := s.Neighbors(nicID)
+			if err != nil {
+				t.Errorf("s.Neighbors(%d): %v", nicID, err)
+			}
+			for _, n := range neighbors {
+				if n.Addr == lladdr1 {
+					t.Errorf("got neighbor entry for %q, want does not exist", string(n.Addr))
+				}
 			}
 
-			if test.expectedLinkAddr != "" {
-				if err != nil {
-					t.Errorf("s.GetLinkAddress(%d, %s, %s, %d, nil): %s", nicID, lladdr1, lladdr0, ProtocolNumber, err)
-				}
-				if c != nil {
-					t.Errorf("got unexpected channel")
-				}
-
+			if test.valid {
 				// Invalid count should not have increased.
 				if got := invalid.Value(); got != 0 {
 					t.Errorf("got invalid = %d, want = 0", got)
 				}
 			} else {
-				if err != tcpip.ErrWouldBlock {
-					t.Errorf("got s.GetLinkAddress(%d, %s, %s, %d, nil) = (_, _, %v), want = (_, _, %s)", nicID, lladdr1, lladdr0, ProtocolNumber, err, tcpip.ErrWouldBlock)
-				}
-				if c == nil {
-					t.Errorf("expected channel from call to s.GetLinkAddress(%d, %s, %s, %d, nil)", nicID, lladdr1, lladdr0, ProtocolNumber)
-				}
-
 				// Invalid count should have increased.
 				if got := invalid.Value(); got != 1 {
 					t.Errorf("got invalid = %d, want = 1", got)

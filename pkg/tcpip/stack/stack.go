@@ -38,13 +38,6 @@ import (
 )
 
 const (
-	// ageLimit is set to the same cache stale time used in Linux.
-	ageLimit = 1 * time.Minute
-	// resolutionTimeout is set to the same ARP timeout used in Linux.
-	resolutionTimeout = 1 * time.Second
-	// resolutionAttempts is set to the same ARP retries used in Linux.
-	resolutionAttempts = 3
-
 	// DefaultTOS is the default type of service value for network endpoints.
 	DefaultTOS = 0
 )
@@ -399,8 +392,6 @@ type Stack struct {
 
 	stats tcpip.Stats
 
-	linkAddrCache *linkAddrCache
-
 	mu               sync.RWMutex
 	nics             map[tcpip.NICID]*NIC
 	forwarding       bool
@@ -447,6 +438,9 @@ type Stack struct {
 	// ndpConfigs is the default NDP configurations used by interfaces.
 	ndpConfigs NDPConfigurations
 
+	// nudConfigs is the default NUD configurations used by interfaces.
+	nudConfigs NUDConfigurations
+
 	// autoGenIPv6LinkLocal determines whether or not the stack will attempt
 	// to auto-generate an IPv6 link-local address for newly enabled non-loopback
 	// NICs. See the AutoGenIPv6LinkLocal field of Options for more details.
@@ -455,6 +449,10 @@ type Stack struct {
 	// ndpDisp is the NDP event dispatcher that is used to send the netstack
 	// integrator NDP related events.
 	ndpDisp NDPDispatcher
+
+	// nudDisp is the NUD event dispatcher that is used to send the netstack
+	// integrator NUD related events.
+	nudDisp NUDDispatcher
 
 	// uniqueIDGenerator is a generator of unique identifiers.
 	uniqueIDGenerator UniqueID
@@ -504,6 +502,9 @@ type Options struct {
 	// before assigning an address to a NIC.
 	NDPConfigs NDPConfigurations
 
+	// NUDConfigs is the default NUD configurations used by interfaces.
+	NUDConfigs NUDConfigurations
+
 	// AutoGenIPv6LinkLocal determines whether or not the stack will attempt to
 	// auto-generate an IPv6 link-local address for newly enabled non-loopback
 	// NICs.
@@ -521,6 +522,10 @@ type Options struct {
 	// NDPDisp is the NDP event dispatcher that an integrator can provide to
 	// receive NDP related events.
 	NDPDisp NDPDispatcher
+
+	// NUDDisp is the NUD event dispatcher that an integrator can provide to
+	// receive NUD related events.
+	NUDDisp NUDDispatcher
 
 	// RawFactory produces raw endpoints. Raw endpoints are enabled only if
 	// this is non-nil.
@@ -633,7 +638,6 @@ func New(opts Options) *Stack {
 		linkAddrResolvers:    make(map[tcpip.NetworkProtocolNumber]LinkAddressResolver),
 		nics:                 make(map[tcpip.NICID]*NIC),
 		cleanupEndpoints:     make(map[TransportEndpoint]struct{}),
-		linkAddrCache:        newLinkAddrCache(ageLimit, resolutionTimeout, resolutionAttempts),
 		PortManager:          ports.NewPortManager(),
 		clock:                clock,
 		stats:                opts.Stats.FillIn(),
@@ -641,9 +645,11 @@ func New(opts Options) *Stack {
 		icmpRateLimiter:      NewICMPRateLimiter(),
 		seed:                 generateRandUint32(),
 		ndpConfigs:           opts.NDPConfigs,
+		nudConfigs:           opts.NUDConfigs.resetInvalidFields(),
 		autoGenIPv6LinkLocal: opts.AutoGenIPv6LinkLocal,
 		uniqueIDGenerator:    opts.UniqueID,
 		ndpDisp:              opts.NDPDisp,
+		nudDisp:              opts.NUDDisp,
 		opaqueIIDOpts:        opts.OpaqueIIDOpts,
 		forwarder:            newForwardQueue(),
 	}
@@ -1116,8 +1122,8 @@ func (s *Stack) AddProtocolAddressWithOptions(id tcpip.NICID, protocolAddress tc
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	nic := s.nics[id]
-	if nic == nil {
+	nic, ok := s.nics[id]
+	if !ok {
 		return tcpip.ErrUnknownNICID
 	}
 
@@ -1264,8 +1270,8 @@ func (s *Stack) CheckLocalAddress(nicID tcpip.NICID, protocol tcpip.NetworkProto
 
 	// If a NIC is specified, we try to find the address there only.
 	if nicID != 0 {
-		nic := s.nics[nicID]
-		if nic == nil {
+		nic, ok := s.nics[nicID]
+		if !ok {
 			return 0
 		}
 
@@ -1296,8 +1302,8 @@ func (s *Stack) SetPromiscuousMode(nicID tcpip.NICID, enable bool) *tcpip.Error 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	nic := s.nics[nicID]
-	if nic == nil {
+	nic, ok := s.nics[nicID]
+	if !ok {
 		return tcpip.ErrUnknownNICID
 	}
 
@@ -1312,8 +1318,8 @@ func (s *Stack) SetSpoofing(nicID tcpip.NICID, enable bool) *tcpip.Error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	nic := s.nics[nicID]
-	if nic == nil {
+	nic, ok := s.nics[nicID]
+	if !ok {
 		return tcpip.ErrUnknownNICID
 	}
 
@@ -1322,38 +1328,82 @@ func (s *Stack) SetSpoofing(nicID tcpip.NICID, enable bool) *tcpip.Error {
 	return nil
 }
 
-// AddLinkAddress adds a link address to the stack link cache.
-func (s *Stack) AddLinkAddress(nicID tcpip.NICID, addr tcpip.Address, linkAddr tcpip.LinkAddress) {
-	fullAddr := tcpip.FullAddress{NIC: nicID, Addr: addr}
-	s.linkAddrCache.add(fullAddr, linkAddr)
-	// TODO: provide a way for a transport endpoint to receive a signal
-	// that AddLinkAddress for a particular address has been called.
-}
-
-// GetLinkAddress implements LinkAddressCache.GetLinkAddress.
-func (s *Stack) GetLinkAddress(nicID tcpip.NICID, addr, localAddr tcpip.Address, protocol tcpip.NetworkProtocolNumber, waker *sleep.Waker) (tcpip.LinkAddress, <-chan struct{}, *tcpip.Error) {
+// Neighbors returns all IP to MAC address associations.
+func (s *Stack) Neighbors(nicID tcpip.NICID) ([]NeighborEntry, *tcpip.Error) {
 	s.mu.RLock()
-	nic := s.nics[nicID]
-	if nic == nil {
-		s.mu.RUnlock()
-		return "", nil, tcpip.ErrUnknownNICID
-	}
+	nic, ok := s.nics[nicID]
 	s.mu.RUnlock()
 
-	fullAddr := tcpip.FullAddress{NIC: nicID, Addr: addr}
-	linkRes := s.linkAddrResolvers[protocol]
-	return s.linkAddrCache.get(fullAddr, linkRes, localAddr, nic.linkEP, waker)
+	if !ok {
+		return nil, tcpip.ErrUnknownNICID
+	}
+
+	// TODO(sbalana): Check if the choosen NIC has a neighbor cache.
+
+	return nic.neighbors(), nil
 }
 
 // RemoveWaker implements LinkAddressCache.RemoveWaker.
 func (s *Stack) RemoveWaker(nicID tcpip.NICID, addr tcpip.Address, waker *sleep.Waker) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	nic, ok := s.nics[nicID]
+	s.mu.RUnlock()
 
-	if nic := s.nics[nicID]; nic == nil {
-		fullAddr := tcpip.FullAddress{NIC: nicID, Addr: addr}
-		s.linkAddrCache.removeWaker(fullAddr, waker)
+	if !ok {
+		return
 	}
+
+	nic.neigh.removeWaker(addr, waker)
+}
+
+// AddStaticNeighbor statically associates an IP address to a MAC address.
+func (s *Stack) AddStaticNeighbor(nicID tcpip.NICID, addr tcpip.Address, linkAddr tcpip.LinkAddress) *tcpip.Error {
+	s.mu.RLock()
+	nic, ok := s.nics[nicID]
+	s.mu.RUnlock()
+
+	if !ok {
+		return tcpip.ErrUnknownNICID
+	}
+
+	nic.addStaticNeighbor(addr, linkAddr)
+	return nil
+}
+
+// RemoveNeighbor removes an IP to MAC address association previously created
+// either automically or by AddStaticNeighbor. Returns ErrNoLinkAddress if
+// there is no association with the provided address.
+func (s *Stack) RemoveNeighbor(nicID tcpip.NICID, addr tcpip.Address) *tcpip.Error {
+	s.mu.RLock()
+	nic, ok := s.nics[nicID]
+	s.mu.RUnlock()
+
+	if !ok {
+		return tcpip.ErrUnknownNICID
+	}
+
+	// TODO(sbalana): Check if the choosen NIC has a neighbor cache.
+
+	if ok := nic.removeNeighbor(addr); !ok {
+		return tcpip.ErrNoLinkAddress
+	}
+	return nil
+}
+
+// ClearNeighbors removes all IP to MAC address associations.
+func (s *Stack) ClearNeighbors(nicID tcpip.NICID) *tcpip.Error {
+	s.mu.RLock()
+	nic, ok := s.nics[nicID]
+	s.mu.RUnlock()
+
+	if !ok {
+		return tcpip.ErrUnknownNICID
+	}
+
+	// TODO(sbalana): Check if the choosen NIC has a neighbor cache.
+
+	nic.clearNeighbors()
+	return nil
 }
 
 // RegisterTransportEndpoint registers the given endpoint with the stack
@@ -1791,6 +1841,36 @@ func (s *Stack) SetNDPConfigurations(id tcpip.NICID, c NDPConfigurations) *tcpip
 	}
 
 	nic.setNDPConfigs(c)
+	return nil
+}
+
+// NUDConfigurations gets the per-interface NUD configurations on the NIC
+// with ID id to c.
+func (s *Stack) NUDConfigurations(id tcpip.NICID) (NUDConfigurations, *tcpip.Error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	nic, ok := s.nics[id]
+	if !ok {
+		return NUDConfigurations{}, tcpip.ErrUnknownNICID
+	}
+	return nic.NUDConfigs(), nil
+}
+
+// SetNUDConfigurations sets the per-interface NUD configurations on the NIC
+// with ID id to c.
+//
+// Note, if c contains invalid NUD configuration values, it will be fixed to
+// use default values for the erroneous values.
+func (s *Stack) SetNUDConfigurations(id tcpip.NICID, c NUDConfigurations) *tcpip.Error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	nic, ok := s.nics[id]
+	if !ok {
+		return tcpip.ErrUnknownNICID
+	}
+
+	nic.setNUDConfigs(c)
 
 	return nil
 }

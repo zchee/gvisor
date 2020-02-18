@@ -42,9 +42,9 @@ const (
 
 // endpoint implements stack.NetworkEndpoint.
 type endpoint struct {
-	nicID         tcpip.NICID
-	linkEP        stack.LinkEndpoint
-	linkAddrCache stack.LinkAddressCache
+	nicID  tcpip.NICID
+	linkEP stack.LinkEndpoint
+	nud    stack.NUDHandler
 }
 
 // DefaultTTL is unused for ARP. It implements stack.NetworkEndpoint.
@@ -102,9 +102,14 @@ func (e *endpoint) HandlePacket(r *stack.Route, pkt tcpip.PacketBuffer) {
 	switch h.Op() {
 	case header.ARPRequest:
 		localAddr := tcpip.Address(h.ProtocolAddressTarget())
-		if e.linkAddrCache.CheckLocalAddress(e.nicID, header.IPv4ProtocolNumber, localAddr) == 0 {
+		if r.Stack().CheckLocalAddress(e.nicID, header.IPv4ProtocolNumber, localAddr) == 0 {
 			return // we have no useful answer, ignore the request
 		}
+
+		remoteAddr := tcpip.Address(h.ProtocolAddressSender())
+		remoteLinkAddr := tcpip.LinkAddress(h.HardwareAddressSender())
+		e.nud.HandleProbe(remoteAddr, localAddr, ProtocolNumber, remoteLinkAddr)
+
 		hdr := buffer.NewPrependable(int(e.linkEP.MaxHeaderLength()) + header.ARPSize)
 		packet := header.ARP(hdr.Prepend(header.ARPSize))
 		packet.SetIPv4OverEthernet()
@@ -113,14 +118,19 @@ func (e *endpoint) HandlePacket(r *stack.Route, pkt tcpip.PacketBuffer) {
 		copy(packet.ProtocolAddressSender(), h.ProtocolAddressTarget())
 		copy(packet.HardwareAddressTarget(), h.HardwareAddressSender())
 		copy(packet.ProtocolAddressTarget(), h.ProtocolAddressSender())
+
+		// TODO(sbalana): If the Target Address is an anycast address, the sender
+		// SHOULD delay sending a response for a random time between 0 and
+		// MaxAnycastDelayTime (RFC 4861 section 7.2.4).
+
 		e.linkEP.WritePacket(r, nil /* gso */, ProtocolNumber, tcpip.PacketBuffer{
 			Header: hdr,
 		})
-		fallthrough // also fill the cache from requests
+
 	case header.ARPReply:
 		addr := tcpip.Address(h.ProtocolAddressSender())
 		linkAddr := tcpip.LinkAddress(h.HardwareAddressSender())
-		e.linkAddrCache.AddLinkAddress(e.nicID, addr, linkAddr)
+		e.nud.HandleConfirmation(addr, linkAddr, true, false, false)
 	}
 }
 
@@ -137,14 +147,14 @@ func (*protocol) ParseAddresses(v buffer.View) (src, dst tcpip.Address) {
 	return tcpip.Address(h.ProtocolAddressSender()), ProtocolAddress
 }
 
-func (p *protocol) NewEndpoint(nicID tcpip.NICID, addrWithPrefix tcpip.AddressWithPrefix, linkAddrCache stack.LinkAddressCache, dispatcher stack.TransportDispatcher, sender stack.LinkEndpoint, st *stack.Stack) (stack.NetworkEndpoint, *tcpip.Error) {
+func (p *protocol) NewEndpoint(nicID tcpip.NICID, addrWithPrefix tcpip.AddressWithPrefix, nud stack.NUDHandler, dispatcher stack.TransportDispatcher, sender stack.LinkEndpoint, st *stack.Stack) (stack.NetworkEndpoint, *tcpip.Error) {
 	if addrWithPrefix.Address != ProtocolAddress {
 		return nil, tcpip.ErrBadLocalAddress
 	}
 	return &endpoint{
-		nicID:         nicID,
-		linkEP:        sender,
-		linkAddrCache: linkAddrCache,
+		nicID:  nicID,
+		linkEP: sender,
+		nud:    nud,
 	}, nil
 }
 
@@ -154,9 +164,12 @@ func (*protocol) LinkAddressProtocol() tcpip.NetworkProtocolNumber {
 }
 
 // LinkAddressRequest implements stack.LinkAddressResolver.LinkAddressRequest.
-func (*protocol) LinkAddressRequest(addr, localAddr tcpip.Address, linkEP stack.LinkEndpoint) *tcpip.Error {
+func (*protocol) LinkAddressRequest(addr, localAddr tcpip.Address, linkAddr tcpip.LinkAddress, linkEP stack.LinkEndpoint) *tcpip.Error {
 	r := &stack.Route{
 		RemoteLinkAddress: broadcastMAC,
+	}
+	if linkAddr != "" {
+		r.RemoteLinkAddress = linkAddr
 	}
 
 	hdr := buffer.NewPrependable(int(linkEP.MaxHeaderLength()) + header.ARPSize)
