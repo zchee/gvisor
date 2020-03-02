@@ -15,8 +15,10 @@
 package gomarshal
 
 import (
+	"fmt"
 	"go/ast"
 	"go/token"
+	"strings"
 )
 
 // interfaceGenerator generates marshalling interfaces for a single type.
@@ -72,7 +74,6 @@ func (g *interfaceGenerator) recordUsedMarshallable(m string) {
 
 func (g *interfaceGenerator) recordUsedImport(i string) {
 	g.is[i] = struct{}{}
-
 }
 
 func (g *interfaceGenerator) recordPotentiallyNonPackedField(fieldName string) {
@@ -162,4 +163,52 @@ func (g *interfaceGenerator) unmarshalScalar(accessor, typ, bufVar string) {
 		g.shiftDynamic(bufVar, accessor)
 		g.recordPotentiallyNonPackedField(accessor)
 	}
+}
+
+func (g *interfaceGenerator) expandBinaryExpr(b *strings.Builder, e *ast.BinaryExpr) {
+	switch x := e.X.(type) {
+	case *ast.BinaryExpr:
+		// Recursively expand sub-expression.
+		g.expandBinaryExpr(b, x)
+	case *ast.Ident:
+		fmt.Fprintf(b, "%s", x.Name)
+	case *ast.BasicLit:
+		fmt.Fprintf(b, "%s", x.Value)
+	default:
+		g.abortAt(e.Pos(), "Cannot convert binary expression to output code. Go-marshal currently only handles simple expressions of literals, constants and basic identifiers")
+	}
+
+	fmt.Fprintf(b, "%s", e.Op)
+
+	switch y := e.Y.(type) {
+	case *ast.BinaryExpr:
+		// Recursively expand sub-expression.
+		g.expandBinaryExpr(b, y)
+	case *ast.Ident:
+		fmt.Fprintf(b, "%s", y.Name)
+	case *ast.BasicLit:
+		fmt.Fprintf(b, "%s", y.Value)
+	default:
+		g.abortAt(e.Pos(), "Cannot convert binary expression to output code. Go-marshal currently only handles simple expressions of literals, constants and basic identifiers")
+	}
+}
+
+// arrayLenExpr returns a string containing a valid golang expression
+// representing the length of array a. The returned expression should be treated
+// as a single value, and will be already parenthesized as required.
+func (g *interfaceGenerator) arrayLenExpr(a *ast.ArrayType) string {
+	var b strings.Builder
+
+	switch l := a.Len.(type) {
+	case *ast.Ident:
+		fmt.Fprintf(&b, "%s", l.Name)
+	case *ast.BasicLit:
+		fmt.Fprintf(&b, "%s", l.Value)
+	case *ast.BinaryExpr:
+		g.expandBinaryExpr(&b, l)
+		return fmt.Sprintf("(%s)", b.String())
+	default:
+		g.abortAt(l.Pos(), "Cannot convert this array len expression to output code. Go-marshal currently only handles simple expressions of literals, constants and basic identifiers")
+	}
+	return b.String()
 }

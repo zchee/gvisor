@@ -62,8 +62,8 @@ func (g *interfaceGenerator) validateStruct(ts *ast.TypeSpec, st *ast.StructType
 				// No validation to perform on selector fields. However this
 				// callback must still be provided.
 			},
-			array: func(n, _ *ast.Ident, len int) {
-				g.validateArrayNewtype(n, f.Type.(*ast.ArrayType))
+			array: func(n *ast.Ident, a *ast.ArrayType, _ *ast.Ident) {
+				g.validateArrayNewtype(n, a)
 			},
 			unhandled: func(_ *ast.Ident) {
 				g.abortAt(f.Pos(), fmt.Sprintf("Marshalling not supported for %s fields", kindString(f.Type)))
@@ -72,20 +72,24 @@ func (g *interfaceGenerator) validateStruct(ts *ast.TypeSpec, st *ast.StructType
 	})
 }
 
-func (g *interfaceGenerator) emitMarshallableForStruct(st *ast.StructType) {
-	// Is g.t a packed struct without consideing field types?
-	thisPacked := true
+func (g *interfaceGenerator) isStructPacked(st *ast.StructType) bool {
+	packed := true
 	forEachStructField(st, func(f *ast.Field) {
 		if f.Tag != nil {
 			if f.Tag.Value == "`marshal:\"unaligned\"`" {
-				if thisPacked {
+				if packed {
 					debugfAt(g.f.Position(g.t.Pos()),
 						fmt.Sprintf("Marking type '%s' as not packed due to tag `marshal:\"unaligned\"`.\n", g.t.Name))
-					thisPacked = false
+					packed = false
 				}
 			}
 		}
 	})
+	return packed
+}
+
+func (g *interfaceGenerator) emitMarshallableForStruct(st *ast.StructType) {
+	thisPacked := g.isStructPacked(st)
 
 	g.emit("// SizeBytes implements marshal.Marshallable.SizeBytes.\n")
 	g.emit("func (%s *%s) SizeBytes() int {\n", g.r, g.typeName())
@@ -108,16 +112,13 @@ func (g *interfaceGenerator) emitMarshallableForStruct(st *ast.StructType) {
 				g.recordUsedMarshallable(tName)
 				dynamicSizeTerms = append(dynamicSizeTerms, fmt.Sprintf("(*%s)(nil).SizeBytes()", tName))
 			},
-			array: func(n, t *ast.Ident, len int) {
-				if len < 1 {
-					// Zero-length arrays should've been rejected by validate().
-					panic("unreachable")
-				}
+			array: func(n *ast.Ident, a *ast.ArrayType, t *ast.Ident) {
+				lenExpr := g.arrayLenExpr(a)
 				if size, dynamic := g.scalarSize(t); !dynamic {
-					primitiveSize += size * len
+					dynamicSizeTerms = append(dynamicSizeTerms, fmt.Sprintf("%d*%s", size, lenExpr))
 				} else {
 					g.recordUsedMarshallable(t.Name)
-					dynamicSizeTerms = append(dynamicSizeTerms, fmt.Sprintf("(*%s)(nil).SizeBytes()*%d", t.Name, len))
+					dynamicSizeTerms = append(dynamicSizeTerms, fmt.Sprintf("(*%s)(nil).SizeBytes()*%s", t.Name, lenExpr))
 				}
 			},
 		}.dispatch)
@@ -148,7 +149,7 @@ func (g *interfaceGenerator) emitMarshallableForStruct(st *ast.StructType) {
 						g.shift("dst", len)
 					} else {
 						// We can't use shiftDynamic here because we don't have
-						// an instance of the dynamic type we can referece here
+						// an instance of the dynamic type we can reference here
 						// (since the version in this struct is anonymous). Use
 						// a typed nil pointer to call SizeBytes() instead.
 						g.emit("dst = dst[(*%s)(nil).SizeBytes():]\n", t.Name)
@@ -158,24 +159,30 @@ func (g *interfaceGenerator) emitMarshallableForStruct(st *ast.StructType) {
 				g.marshalScalar(g.fieldAccessor(n), t.Name, "dst")
 			},
 			selector: func(n, tX, tSel *ast.Ident) {
+				if n.Name == "_" {
+					g.emit("// Padding: dst[:sizeof(%s)] ~= %s(0)\n", tX.Name, tSel.Name)
+					g.emit("dst = dst[(*%s.%s)(nil).SizeBytes():]\n", tX.Name, tSel.Name)
+					return
+				}
 				g.marshalScalar(g.fieldAccessor(n), fmt.Sprintf("%s.%s", tX.Name, tSel.Name), "dst")
 			},
-			array: func(n, t *ast.Ident, size int) {
+			array: func(n *ast.Ident, a *ast.ArrayType, t *ast.Ident) {
+				lenExpr := g.arrayLenExpr(a)
 				if n.Name == "_" {
-					g.emit("// Padding: dst[:sizeof(%s)*%d] ~= [%d]%s{0}\n", t.Name, size, size, t.Name)
-					if len, dynamic := g.scalarSize(t); !dynamic {
-						g.shift("dst", len*size)
+					g.emit("// Padding: dst[:sizeof(%s)*%s] ~= [%s]%s{0}\n", t.Name, lenExpr, lenExpr, t.Name)
+					if size, dynamic := g.scalarSize(t); !dynamic {
+						g.emit("dst = dst[%d*(%s):]\n", size, lenExpr)
 					} else {
 						// We can't use shiftDynamic here because we don't have
 						// an instance of the dynamic type we can reference here
 						// (since the version in this struct is anonymous). Use
 						// a typed nil pointer to call SizeBytes() instead.
-						g.emit("dst = dst[(*%s)(nil).SizeBytes()*%d:]\n", t.Name, size)
+						g.emit("dst = dst[(*%s)(nil).SizeBytes()*(%s):]\n", t.Name, lenExpr)
 					}
 					return
 				}
 
-				g.emit("for idx := 0; idx < %d; idx++ {\n", size)
+				g.emit("for idx := 0; idx < %s; idx++ {\n", lenExpr)
 				g.inIndent(func() {
 					g.marshalScalar(fmt.Sprintf("%s[idx]", g.fieldAccessor(n)), t.Name, "dst")
 				})
@@ -195,11 +202,11 @@ func (g *interfaceGenerator) emitMarshallableForStruct(st *ast.StructType) {
 					if len, dynamic := g.scalarSize(t); !dynamic {
 						g.shift("src", len)
 					} else {
-						// We can't use shiftDynamic here because we don't have
-						// an instance of the dynamic type we can reference here
-						// (since the version in this struct is anonymous). Use
-						// a typed nil pointer to call SizeBytes() instead.
-						g.emit("src = src[(*%s)(nil).SizeBytes():]\n", t.Name)
+						// We don't have an instance of the dynamic type we can
+						// reference here (since the version in this struct is
+						// anonymous). Use a typed nil pointer to call
+						// SizeBytes() instead.
+						g.shiftDynamic("src", fmt.Sprintf("(*%s)(nil)", t.Name))
 						g.recordPotentiallyNonPackedField(fmt.Sprintf("(*%s)(nil)", t.Name))
 					}
 					return
@@ -207,24 +214,31 @@ func (g *interfaceGenerator) emitMarshallableForStruct(st *ast.StructType) {
 				g.unmarshalScalar(g.fieldAccessor(n), t.Name, "src")
 			},
 			selector: func(n, tX, tSel *ast.Ident) {
+				if n.Name == "_" {
+					g.emit("// Padding: %s ~= src[:sizeof(%s.%s)]\n", g.fieldAccessor(n), tX.Name, tSel.Name)
+					g.emit("src = src[(*%s.%s)(nil).SizeBytes():]\n", tX.Name, tSel.Name)
+					g.recordPotentiallyNonPackedField(fmt.Sprintf("(*%s.%s)(nil)", tX.Name, tSel.Name))
+					return
+				}
 				g.unmarshalScalar(g.fieldAccessor(n), fmt.Sprintf("%s.%s", tX.Name, tSel.Name), "src")
 			},
-			array: func(n, t *ast.Ident, size int) {
+			array: func(n *ast.Ident, a *ast.ArrayType, t *ast.Ident) {
+				lenExpr := g.arrayLenExpr(a)
 				if n.Name == "_" {
-					g.emit("// Padding: ~ copy([%d]%s(%s), src[:sizeof(%s)*%d])\n", size, t.Name, g.fieldAccessor(n), t.Name, size)
-					if len, dynamic := g.scalarSize(t); !dynamic {
-						g.shift("src", len*size)
+					g.emit("// Padding: ~ copy([%s]%s(%s), src[:sizeof(%s)*%s])\n", lenExpr, t.Name, g.fieldAccessor(n), t.Name, lenExpr)
+					if size, dynamic := g.scalarSize(t); !dynamic {
+						g.emit("src = src[%d*(%s):]\n", size, lenExpr)
 					} else {
 						// We can't use shiftDynamic here because we don't have
 						// an instance of the dynamic type we can referece here
 						// (since the version in this struct is anonymous). Use
 						// a typed nil pointer to call SizeBytes() instead.
-						g.emit("src = src[(*%s)(nil).SizeBytes()*%d:]\n", t.Name, size)
+						g.emit("src = src[(*%s)(nil).SizeBytes()*(%s):]\n", t.Name, lenExpr)
 					}
 					return
 				}
 
-				g.emit("for idx := 0; idx < %d; idx++ {\n", size)
+				g.emit("for idx := 0; idx < %s; idx++ {\n", lenExpr)
 				g.inIndent(func() {
 					g.unmarshalScalar(fmt.Sprintf("%s[idx]", g.fieldAccessor(n)), t.Name, "src")
 				})
@@ -442,6 +456,232 @@ func (g *interfaceGenerator) emitMarshallableForStruct(st *ast.StructType) {
 			g.emit("// must live until after the Write.\n")
 			g.emit("runtime.KeepAlive(%s)\n", g.r)
 			g.emit("return int64(len), err\n")
+		} else {
+			fallback()
+		}
+	})
+	g.emit("}\n\n")
+}
+
+func (g *interfaceGenerator) emitMarshallableSliceForStruct(st *ast.StructType, slice *sliceAPI) {
+	thisPacked := g.isStructPacked(st)
+
+	if slice.inner {
+		abortAt(g.f.Position(slice.comment.Slash), fmt.Sprintf("The ':inner' argument to '+marshal slice:%s:inner' is only applicable to newtypes on primitives. Remove it from this struct declaration.", slice.ident))
+	}
+
+	g.recordUsedImport("marshal")
+	g.recordUsedImport("usermem")
+
+	g.emit("// Copy%sIn copies in a slice of %s objects from the task's memory.\n", slice.ident, g.typeName())
+	g.emit("func Copy%sIn(task marshal.Task, addr usermem.Addr, dst []%s) error {\n", slice.ident, g.typeName())
+	g.inIndent(func() {
+		g.emit("count := len(dst)\n")
+		g.emit("if count == 0 {\n")
+		g.inIndent(func() {
+			g.emit("return nil\n")
+		})
+		g.emit("}\n")
+		g.emit("size := (*%s)(nil).SizeBytes()\n\n", g.typeName())
+
+		fallback := func() {
+			g.emit("// Type %s doesn't have a packed layout in memory, fall back to UnmarshalBytes.\n", g.typeName())
+			g.emit("buf := task.CopyScratchBuffer(size * count)\n")
+			g.emit("_, err := task.CopyInBytes(addr, buf)\n")
+			g.emit("if err != nil {\n")
+			g.inIndent(func() {
+				g.emit("return err\n")
+			})
+			g.emit("}\n")
+
+			g.emit("for idx := 0; idx < count; idx++ {\n")
+			g.inIndent(func() {
+				g.emit("dst[idx].UnmarshalBytes(buf[size*idx:size*(idx+1)])\n")
+			})
+			g.emit("}\n")
+
+			g.emit("return nil\n")
+		}
+		if thisPacked {
+			g.recordUsedImport("reflect")
+			g.recordUsedImport("runtime")
+			g.recordUsedImport("unsafe")
+			if _, ok := g.areFieldsPackedExpression(); ok {
+				g.emit("if !dst[0].Packed() {\n")
+				g.inIndent(fallback)
+				g.emit("}\n\n")
+			}
+			// Fast deserialization.
+			g.emit("// Bypass escape analysis on dst. The no-op arithmetic operation on the\n")
+			g.emit("// pointer makes the compiler think val doesn't depend on dst.\n")
+			g.emit("// See src/runtime/stubs.go:noescape() in the golang toolchain.\n")
+			g.emit("ptr := unsafe.Pointer(&dst)\n")
+			g.emit("val := (*reflect.SliceHeader)(ptr).Data\n")
+			g.emit("val = val^0\n\n")
+
+			g.emit("// Construct a slice backed by dst's underlying memory.\n")
+			g.emit("var buf []byte\n")
+			g.emit("hdr := (*reflect.SliceHeader)(unsafe.Pointer(&buf))\n")
+			g.emit("hdr.Data = val\n")
+			g.emit("hdr.Len = size * count\n")
+			g.emit("hdr.Cap = size * count\n")
+
+			g.emit("_, err := task.CopyInBytes(addr, buf)\n")
+			g.emit("// Since we bypassed the compiler's escape analysis, indicate that dst\n")
+			g.emit("// must live until after the CopyInBytes.\n")
+			g.emit("runtime.KeepAlive(dst)\n")
+			g.emit("return err\n")
+		} else {
+			fallback()
+		}
+	})
+	g.emit("}\n\n")
+
+	g.emit("// Copy%sOut copies a slice of %s objects to the task's memory.\n", slice.ident, g.typeName())
+	g.emit("func Copy%sOut(task marshal.Task, addr usermem.Addr, src []%s) error {\n", slice.ident, g.typeName())
+	g.inIndent(func() {
+		g.emit("count := len(src)\n")
+		g.emit("if count == 0 {\n")
+		g.inIndent(func() {
+			g.emit("return nil\n")
+		})
+		g.emit("}\n")
+		g.emit("size := (*%s)(nil).SizeBytes()\n\n", g.typeName())
+
+		fallback := func() {
+			g.emit("// Type %s doesn't have a packed layout in memory, fall back to MarshalBytes.\n", g.typeName())
+			g.emit("buf := task.CopyScratchBuffer(size * count)\n")
+			g.emit("for idx := 0; idx < count; idx++ {\n")
+			g.inIndent(func() {
+				g.emit("src[idx].MarshalBytes(buf[size*idx:size*(idx+1)])\n")
+			})
+			g.emit("}\n")
+			g.emit("_, err := task.CopyOutBytes(addr, buf)\n")
+			g.emit("return err\n")
+		}
+		if thisPacked {
+			g.recordUsedImport("reflect")
+			g.recordUsedImport("runtime")
+			g.recordUsedImport("unsafe")
+			if _, ok := g.areFieldsPackedExpression(); ok {
+				g.emit("if !src[0].Packed() {\n")
+				g.inIndent(fallback)
+				g.emit("}\n\n")
+			}
+			// Fast serialization.
+			g.emit("// Bypass escape analysis on src. The no-op arithmetic operation on the\n")
+			g.emit("// pointer makes the compiler think val doesn't depend on src.\n")
+			g.emit("// See src/runtime/stubs.go:noescape() in the golang toolchain.\n")
+			g.emit("ptr := unsafe.Pointer(&src)\n")
+			g.emit("val := (*reflect.SliceHeader)(ptr).Data\n")
+			g.emit("val = val^0\n\n")
+
+			g.emit("// Construct a slice backed by src's underlying memory.\n")
+			g.emit("var buf []byte\n")
+			g.emit("hdr := (*reflect.SliceHeader)(unsafe.Pointer(&buf))\n")
+			g.emit("hdr.Data = val\n")
+			g.emit("hdr.Len = size * count\n")
+			g.emit("hdr.Cap = size * count\n")
+
+			g.emit("_, err := task.CopyOutBytes(addr, buf)\n")
+			g.emit("// Since we bypassed the compiler's escape analysis, indicate that src\n")
+			g.emit("// must live until after the CopyOutBytes.\n")
+			g.emit("runtime.KeepAlive(src)\n")
+			g.emit("return err\n")
+		} else {
+			fallback()
+		}
+	})
+	g.emit("}\n\n")
+
+	g.emit("// MarshalUnsafe%s is like %s.MarshalUnsafe, but for a []%s.\n", slice.ident, g.typeName(), g.typeName())
+	g.emit("func MarshalUnsafe%s(src []%s, dst []byte) error {\n", slice.ident, g.typeName())
+	g.inIndent(func() {
+		g.emit("count := len(src)\n")
+		g.emit("if count == 0 {\n")
+		g.inIndent(func() {
+			g.emit("return nil\n")
+		})
+		g.emit("}\n")
+		g.emit("size := (*%s)(nil).SizeBytes()\n\n", g.typeName())
+
+		fallback := func() {
+			g.emit("// Type %s doesn't have a packed layout in memory, fall back to MarshalBytes.\n", g.typeName())
+			g.emit("for idx := 0; idx < count; idx++ {\n")
+			g.inIndent(func() {
+				g.emit("src[idx].MarshalBytes(dst[size*idx:(size)*(idx+1)])\n")
+			})
+			g.emit("}\n")
+			g.emit("return nil\n")
+		}
+		if thisPacked {
+			g.recordUsedImport("reflect")
+			g.recordUsedImport("runtime")
+			g.recordUsedImport("unsafe")
+			if _, ok := g.areFieldsPackedExpression(); ok {
+				g.emit("if !src[0].Packed() {\n")
+				g.inIndent(fallback)
+				g.emit("}\n\n")
+			}
+			g.emit("// Bypass escape analysis on src. The no-op arithmetic operation on the\n")
+			g.emit("// pointer makes the compiler think val doesn't depend on src.\n")
+			g.emit("// See src/runtime/stubs.go:noescape() in the golang toolchain.\n")
+			g.emit("ptr := unsafe.Pointer(&src)\n")
+			g.emit("val := (*reflect.SliceHeader)(ptr).Data\n")
+			g.emit("val = val^0\n\n")
+
+			g.emit("_, err := safecopy.CopyIn(dst[:(size*count)], unsafe.Pointer(val))\n")
+			g.emit("// Since we bypassed the compiler's escape analysis, indicate that src\n")
+			g.emit("// must live until after the CopyIn.\n")
+			g.emit("runtime.KeepAlive(src)\n")
+			g.emit("return err\n")
+		} else {
+			fallback()
+		}
+	})
+	g.emit("}\n\n")
+
+	g.emit("// UnmarshalUnsafe%s is like %s.UnmarshalUnsafe, but for a []%s.\n", slice.ident, g.typeName(), g.typeName())
+	g.emit("func UnmarshalUnsafe%s(dst []%s, src []byte) error {\n", slice.ident, g.typeName())
+	g.inIndent(func() {
+		g.emit("count := len(dst)\n")
+		g.emit("if count == 0 {\n")
+		g.inIndent(func() {
+			g.emit("return nil\n")
+		})
+		g.emit("}\n")
+		g.emit("size := (*%s)(nil).SizeBytes()\n\n", g.typeName())
+
+		fallback := func() {
+			g.emit("// Type %s doesn't have a packed layout in memory, fall back to UnmarshalBytes.\n", g.typeName())
+			g.emit("for idx := 0; idx < count; idx++ {\n")
+			g.inIndent(func() {
+				g.emit("dst[idx].UnmarshalBytes(src[size*idx:size*(idx+1)])\n")
+			})
+			g.emit("}\n")
+			g.emit("return nil\n")
+		}
+		if thisPacked {
+			g.recordUsedImport("reflect")
+			g.recordUsedImport("runtime")
+			g.recordUsedImport("unsafe")
+			if _, ok := g.areFieldsPackedExpression(); ok {
+				g.emit("if !dst[0].Packed() {\n")
+				g.inIndent(fallback)
+				g.emit("}\n\n")
+			}
+			g.emit("// Bypass escape analysis on src. The no-op arithmetic operation on the\n")
+			g.emit("// pointer makes the compiler think val doesn't depend on src.\n")
+			g.emit("// See src/runtime/stubs.go:noescape() in the golang toolchain.\n")
+			g.emit("ptr := unsafe.Pointer(&dst)\n")
+			g.emit("val := (*reflect.SliceHeader)(ptr).Data\n")
+			g.emit("val = val^0\n\n")
+
+			g.emit("_, err := safecopy.CopyOut(unsafe.Pointer(val), src[:(size*count)])\n")
+			g.emit("// Since we bypassed the compiler's escape analysis, indicate that src\n")
+			g.emit("// must live until after the CopyOut.\n")
+			g.emit("runtime.KeepAlive(src)\n")
+			g.emit("return err\n")
 		} else {
 			fallback()
 		}
