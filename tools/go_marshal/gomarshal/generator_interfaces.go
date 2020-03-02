@@ -72,7 +72,6 @@ func (g *interfaceGenerator) recordUsedMarshallable(m string) {
 
 func (g *interfaceGenerator) recordUsedImport(i string) {
 	g.is[i] = struct{}{}
-
 }
 
 func (g *interfaceGenerator) recordPotentiallyNonPackedField(fieldName string) {
@@ -162,4 +161,76 @@ func (g *interfaceGenerator) unmarshalScalar(accessor, typ, bufVar string) {
 		g.shiftDynamic(bufVar, accessor)
 		g.recordPotentiallyNonPackedField(accessor)
 	}
+}
+
+// emitCastToByteSlice unsafely casts an arbitrary type's underlying memory to a
+// byte slice. As part of the cast, the byte slice is made to look independent
+// of the src type by bypassing escape analysis. This means the byte slice can
+// be used without causing the source to escape. The caller is responsible for
+// ensuring srcPtr lives until they're done with dstVar, as the runtime no
+// longer considers dstVar dependent on srcPtr and is free to GC it.
+//
+// srcPtr must be a pointer.
+//
+// This function uses internally uses the identifiers "ptr", "val" and "hdr",
+// and cannot be used in a context where these identifiers are already bound.
+func (g *interfaceGenerator) emitCastToByteSlice(srcPtr, dstVar, lenExpr string) {
+	g.emit("// Bypass escape analysis on dst. The no-op arithmetic operation on the\n")
+	g.emit("// pointer makes the compiler think val doesn't depend on dst.\n")
+	g.emit("// See src/runtime/stubs.go:noescape() in the golang toolchain.\n")
+	g.emit("ptr := unsafe.Pointer(%s)\n", srcPtr)
+	g.emit("val := uintptr(ptr)\n")
+	g.emit("val = val^0\n\n")
+
+	g.emit("// Construct a slice backed by dst's underlying memory.\n")
+	g.emit("var %s []byte\n", dstVar)
+	g.emit("hdr := (*reflect.SliceHeader)(unsafe.Pointer(&%s))\n", dstVar)
+	g.emit("hdr.Data = val\n")
+	g.emit("hdr.Len = %s\n", lenExpr)
+	g.emit("hdr.Cap = %s\n\n", lenExpr)
+}
+
+// emitCastToByteSlice unsafely casts a slice with elements of an abitrary type
+// to a byte slice. As part of the cast, the byte slice is made to look
+// independent of the src slice by bypassing escape analysis. This means the
+// byte slice can be used without causing the source to escape. The caller is
+// responsible for ensuring srcPtr lives until they're done with dstVar, as the
+// runtime no longer considers dstVar dependent on srcPtr and is free to GC it.
+//
+// srcPtr must be a pointer.
+//
+// This function uses internally uses the identifiers "ptr", "val" and "hdr",
+// and cannot be used in a context where these identifiers are already bound.
+func (g *interfaceGenerator) emitCastSliceToByteSlice(srcPtr, dstVar, lenExpr string) {
+	g.emit("// Bypass escape analysis on dst. The no-op arithmetic operation on the\n")
+	g.emit("// pointer makes the compiler think val doesn't depend on dst.\n")
+	g.emit("// See src/runtime/stubs.go:noescape() in the golang toolchain.\n")
+	g.emit("ptr := unsafe.Pointer(%s)\n", srcPtr)
+	g.emit("val := (*reflect.SliceHeader)(ptr).Data\n")
+	g.emit("val = val^0\n\n")
+
+	g.emit("// Construct a slice backed by dst's underlying memory.\n")
+	g.emit("var %s []byte\n", dstVar)
+	g.emit("hdr := (*reflect.SliceHeader)(unsafe.Pointer(&%s))\n", dstVar)
+	g.emit("hdr.Data = val\n")
+	g.emit("hdr.Len = %s\n", lenExpr)
+	g.emit("hdr.Cap = %s\n\n", lenExpr)
+}
+
+// emitNoEscapeSliceDataPointer unsafely casts a slice's data pointer to a
+// uintptr, which effectively bypasses escape analysis. The caller is
+// responsible for ensuring srcPtr lives until they're done with dstVar, as the
+// runtime no longer considers dstVar dependent on srcPtr and is free to GC it.
+//
+// srcPtr must be a pointer.
+//
+// This function uses internally uses the identifier "ptr" cannot be used in a
+// context where this identifier is already bound.
+func (g *interfaceGenerator) emitNoEscapeSliceDataPointer(srcPtr, dstVar string) {
+	g.emit("// Bypass escape analysis on src. The no-op arithmetic operation on the\n")
+	g.emit("// pointer makes the compiler think val doesn't depend on src.\n")
+	g.emit("// See src/runtime/stubs.go:noescape() in the golang toolchain.\n")
+	g.emit("ptr := unsafe.Pointer(%s)\n", srcPtr)
+	g.emit("%s := (*reflect.SliceHeader)(ptr).Data\n", dstVar)
+	g.emit("%s = %s^0\n\n", dstVar, dstVar)
 }
