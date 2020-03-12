@@ -409,11 +409,24 @@ func (d *transportDemuxer) deliverPacket(r *Route, protocol tcpip.TransportProto
 		return false
 	}
 
-	// If the packet is a UDP broadcast or multicast, then find all matching
-	// transport endpoints.
+	if protocol == header.UDPProtocolNumber {
+		// Send both unicast and broadcast to endpoint bound to ANY listening to this port.
+		// DHCP client is the only known user of this feature, so limit this to UDP only.
+		any := TransportEndpointID{
+			LocalPort:    id.LocalPort,
+			LocalAddress: header.IPv4Any,
+		}
+		// handlePacket takes ownership of pkt, so making a clone because there
+		// might be other receivers.
+		if ep := eps.endpoints[any]; ep != nil {
+			ep.handlePacket(r, id, pkt.Clone())
+		}
+	}
+
+	// If the packet is a UDP broadcast or multicast, then find all matching transport endpoints.
 	if protocol == header.UDPProtocolNumber && isMulticastOrBroadcast(id.LocalAddress) {
 		eps.mu.RLock()
-		destEPs := d.findAllEndpointsLocked(eps, id)
+		destEPs := findAllEndpointsLocked(eps, id)
 		eps.mu.RUnlock()
 		// Fail if we didn't find at least one matching transport endpoint.
 		if len(destEPs) == 0 {
@@ -439,7 +452,7 @@ func (d *transportDemuxer) deliverPacket(r *Route, protocol tcpip.TransportProto
 	}
 
 	eps.mu.RLock()
-	ep := d.findEndpointLocked(eps, id)
+	ep := findEndpointLocked(eps, id)
 	eps.mu.RUnlock()
 	if ep == nil {
 		if protocol == header.UDPProtocolNumber {
@@ -485,7 +498,7 @@ func (d *transportDemuxer) deliverControlPacket(n *NIC, net tcpip.NetworkProtoco
 
 	// Try to find the endpoint.
 	eps.mu.RLock()
-	ep := d.findEndpointLocked(eps, id)
+	ep := findEndpointLocked(eps, id)
 	eps.mu.RUnlock()
 
 	// Fail if we didn't find one.
@@ -499,12 +512,12 @@ func (d *transportDemuxer) deliverControlPacket(n *NIC, net tcpip.NetworkProtoco
 	return true
 }
 
-// iterEndpointsLocked yields all endpointsByNic in eps that match id, in
-// descending order of match quality. If a call to yield returns false,
+// iterEndpointsLocked yields all endpointsByNic in eps that match id,
+// in descending order of match quality. If a call to yield returns false,
 // iterEndpointsLocked stops iteration and returns immediately.
 //
 // Preconditions: eps.mu must be locked.
-func (d *transportDemuxer) iterEndpointsLocked(eps *transportEndpoints, id TransportEndpointID, yield func(*endpointsByNic) bool) {
+func iterEndpointsLocked(eps *transportEndpoints, id TransportEndpointID, yield func(*endpointsByNic) bool) {
 	// Try to find a match with the id as provided.
 	if ep, ok := eps.endpoints[id]; ok {
 		if !yield(ep) {
@@ -541,9 +554,9 @@ func (d *transportDemuxer) iterEndpointsLocked(eps *transportEndpoints, id Trans
 	}
 }
 
-func (d *transportDemuxer) findAllEndpointsLocked(eps *transportEndpoints, id TransportEndpointID) []*endpointsByNic {
+func findAllEndpointsLocked(eps *transportEndpoints, id TransportEndpointID) []*endpointsByNic {
 	var matchedEPs []*endpointsByNic
-	d.iterEndpointsLocked(eps, id, func(ep *endpointsByNic) bool {
+	iterEndpointsLocked(eps, id, func(ep *endpointsByNic) bool {
 		matchedEPs = append(matchedEPs, ep)
 		return true
 	})
@@ -558,7 +571,7 @@ func (d *transportDemuxer) findTransportEndpoint(netProto tcpip.NetworkProtocolN
 	}
 	// Try to find the endpoint.
 	eps.mu.RLock()
-	epsByNic := d.findEndpointLocked(eps, id)
+	epsByNic := findEndpointLocked(eps, id)
 	// Fail if we didn't find one.
 	if epsByNic == nil {
 		eps.mu.RUnlock()
@@ -581,11 +594,10 @@ func (d *transportDemuxer) findTransportEndpoint(netProto tcpip.NetworkProtocolN
 	return ep
 }
 
-// findEndpointLocked returns the endpoint that most closely matches the given
-// id.
-func (d *transportDemuxer) findEndpointLocked(eps *transportEndpoints, id TransportEndpointID) *endpointsByNic {
+// findEndpointLocked returns the endpoint that most closely matches the given id.
+func findEndpointLocked(eps *transportEndpoints, id TransportEndpointID) *endpointsByNic {
 	var matchedEP *endpointsByNic
-	d.iterEndpointsLocked(eps, id, func(ep *endpointsByNic) bool {
+	iterEndpointsLocked(eps, id, func(ep *endpointsByNic) bool {
 		matchedEP = ep
 		return false
 	})
