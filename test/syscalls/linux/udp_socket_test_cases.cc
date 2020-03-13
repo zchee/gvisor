@@ -16,8 +16,10 @@
 
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <math.h>
 #include <netinet/in.h>
 #include <sys/ioctl.h>
+#include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 
@@ -31,6 +33,7 @@
 #include "absl/time/time.h"
 #include "test/syscalls/linux/socket_test_util.h"
 #include "test/syscalls/linux/unix_domain_socket_test_util.h"
+#include "test/util/temp_path.h"
 #include "test/util/test_util.h"
 #include "test/util/thread_util.h"
 
@@ -744,6 +747,19 @@ TEST_P(UdpSocketTest, SendAndReceiveConnected) {
   EXPECT_THAT(recv(s_, received, sizeof(received), 0),
               SyscallSucceedsWithValue(sizeof(received)));
   EXPECT_EQ(memcmp(buf, received, sizeof(buf)), 0);
+}
+
+TEST_P(UdpSocketTest, SendpageFromEmptyFile) {
+  // Bind s_ to loopback:TestPort, and connect to loopback:TestPort+1.
+  ASSERT_THAT(bind(s_, addr_[0], addrlen_), SyscallSucceeds());
+  ASSERT_THAT(connect(s_, addr_[1], addrlen_), SyscallSucceeds());
+
+  TempPath file = ASSERT_NO_ERRNO_AND_VALUE(TempPath::CreateFile());
+  const FileDescriptor fd =
+      ASSERT_NO_ERRNO_AND_VALUE(Open(file.path(), O_RDWR));
+
+  EXPECT_THAT(sendfile(s_, fd.get(), 0x0, 0x8000000000004),
+              SyscallSucceedsWithValue(0));
 }
 
 TEST_P(UdpSocketTest, ReceiveFromNotConnected) {
