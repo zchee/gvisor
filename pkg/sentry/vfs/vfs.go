@@ -38,6 +38,7 @@ import (
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/fspath"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
+	"gvisor.dev/gvisor/pkg/sentry/socket/unix/transport"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/syserror"
 )
@@ -88,6 +89,13 @@ type VirtualFilesystem struct {
 	//
 	// anonMount is analogous to Linux's anon_inode_mnt.
 	anonMount *Mount
+
+	// SocketMount is a Mount, not included in mounts or mountpoints,
+	// representing a socketfs.filesystem. SocketMount is used to back
+	// VirtualDentries representing unnamed socket files.
+	//
+	// SocketMount is immutable.
+	SocketMount *Mount
 
 	// devices contains all registered Devices. devices is protected by
 	// devicesMu.
@@ -346,6 +354,45 @@ func (vfs *VirtualFilesystem) MknodAt(ctx context.Context, creds *auth.Credentia
 		if !rp.handleError(err) {
 			vfs.putResolvingPath(rp)
 			return err
+		}
+	}
+}
+
+// BindAt binds bep to a new socket file at the given path.
+func (vfs *VirtualFilesystem) BindAt(ctx context.Context, creds *auth.Credentials, pop *PathOperation, bep transport.BoundEndpoint, mode linux.FileMode) error {
+	err := vfs.MknodAt(ctx, creds, pop, &MknodOptions{
+		Mode: linux.S_IFSOCK | (mode & linux.PermissionsMask),
+		// TODO(gvisor.dev/issue/1476): Set up with unix socket device number.
+		DevMajor: 0,
+		DevMinor: 0,
+		EP:       bep,
+	})
+	if err == syserror.EEXIST {
+		return syserror.EADDRINUSE
+	}
+	return err
+}
+
+// BoundEndpointAt gets the bound endpoint at the given path.
+//
+// If none exists for the path specified, nil is returned.
+func (vfs *VirtualFilesystem) BoundEndpointAt(ctx context.Context, creds *auth.Credentials, pop *PathOperation) (transport.BoundEndpoint, error) {
+	if !pop.Path.Begin.Ok() {
+		if pop.Path.Absolute {
+			return nil, nil
+		}
+		return nil, syserror.ENOENT
+	}
+	rp := vfs.getResolvingPath(creds, pop)
+	for {
+		bep, err := rp.mount.fs.impl.BoundEndpointAt(ctx, rp)
+		if err == nil {
+			vfs.putResolvingPath(rp)
+			return bep, nil
+		}
+		if !rp.handleError(err) {
+			vfs.putResolvingPath(rp)
+			return nil, err
 		}
 	}
 }

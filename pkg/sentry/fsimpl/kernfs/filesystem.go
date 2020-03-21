@@ -23,6 +23,7 @@ import (
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/fspath"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
+	"gvisor.dev/gvisor/pkg/sentry/socket/unix/transport"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/syserror"
 )
@@ -726,6 +727,13 @@ func (fs *Filesystem) UnlinkAt(ctx context.Context, rp *vfs.ResolvingPath) error
 	}
 	virtfs.CommitDeleteDentry(vfsd)
 	return nil
+}
+
+// BoundEndpointAt implements FilesystemImpl.BoundEndpointAt.
+//
+// TODO(gvisor.dev/issue/1476): Implement BoundEndpointAt.
+func (fs *Filesystem) BoundEndpointAt(ctx context.Context, rp *vfs.ResolvingPath) (transport.BoundEndpoint, error) {
+	return nil, nil
 }
 
 // ListxattrAt implements vfs.FilesystemImpl.ListxattrAt.
