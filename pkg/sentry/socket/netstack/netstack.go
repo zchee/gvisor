@@ -933,7 +933,7 @@ func (s *SocketOperations) GetSockOpt(t *kernel.Task, level, name int, outPtr us
 
 // GetSockOpt can be used to implement the linux syscall getsockopt(2) for
 // sockets backed by a commonEndpoint.
-func GetSockOpt(t *kernel.Task, s socket.Socket, ep commonEndpoint, family int, skType linux.SockType, level, name, outLen int) (interface{}, *syserr.Error) {
+func GetSockOpt(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, family int, skType linux.SockType, level, name, outLen int) (interface{}, *syserr.Error) {
 	switch level {
 	case linux.SOL_SOCKET:
 		return getSockOptSocket(t, s, ep, family, skType, name, outLen)
@@ -959,7 +959,7 @@ func GetSockOpt(t *kernel.Task, s socket.Socket, ep commonEndpoint, family int, 
 }
 
 // getSockOptSocket implements GetSockOpt when level is SOL_SOCKET.
-func getSockOptSocket(t *kernel.Task, s socket.Socket, ep commonEndpoint, family int, skType linux.SockType, name, outLen int) (interface{}, *syserr.Error) {
+func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, family int, skType linux.SockType, name, outLen int) (interface{}, *syserr.Error) {
 	// TODO(b/124056281): Stop rejecting short optLen values in getsockopt.
 	switch name {
 	case linux.SO_ERROR:
@@ -1534,7 +1534,7 @@ func (s *SocketOperations) SetSockOpt(t *kernel.Task, level int, name int, optVa
 
 // SetSockOpt can be used to implement the linux syscall setsockopt(2) for
 // sockets backed by a commonEndpoint.
-func SetSockOpt(t *kernel.Task, s socket.Socket, ep commonEndpoint, level int, name int, optVal []byte) *syserr.Error {
+func SetSockOpt(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, level int, name int, optVal []byte) *syserr.Error {
 	switch level {
 	case linux.SOL_SOCKET:
 		return setSockOptSocket(t, s, ep, name, optVal)
@@ -1561,7 +1561,7 @@ func SetSockOpt(t *kernel.Task, s socket.Socket, ep commonEndpoint, level int, n
 }
 
 // setSockOptSocket implements SetSockOpt when level is SOL_SOCKET.
-func setSockOptSocket(t *kernel.Task, s socket.Socket, ep commonEndpoint, name int, optVal []byte) *syserr.Error {
+func setSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name int, optVal []byte) *syserr.Error {
 	switch name {
 	case linux.SO_SNDBUF:
 		if len(optVal) < sizeOfInt32 {

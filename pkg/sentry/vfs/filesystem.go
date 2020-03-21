@@ -21,6 +21,7 @@ import (
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/fspath"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
+	"gvisor.dev/gvisor/pkg/sentry/socket/unix/transport"
 )
 
 // A Filesystem is a tree of nodes represented by Dentries, which forms part of
@@ -459,6 +460,9 @@ type FilesystemImpl interface {
 	// - If extended attributes are not supported by the filesystem,
 	// RemovexattrAt returns ENOTSUP.
 	RemovexattrAt(ctx context.Context, rp *ResolvingPath, name string) error
+
+	// BoundEndpointAt returns the Unix socket endpoint bound at the path rp.
+	BoundEndpointAt(ctx context.Context, rp *ResolvingPath) (transport.BoundEndpoint, error)
 
 	// PrependPath prepends a path from vd to vd.Mount().Root() to b.
 	//
