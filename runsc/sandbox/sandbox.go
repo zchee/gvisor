@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -719,7 +720,11 @@ func (s *Sandbox) createSandboxProcess(conf *boot.Config, args *Args, startSyncF
 	log.Debugf("Starting sandbox: %s %v", binPath, cmd.Args)
 	log.Debugf("SysProcAttr: %+v", cmd.SysProcAttr)
 	if err := specutils.StartInNS(cmd, nss); err != nil {
-		return fmt.Errorf("Sandbox: %v", err)
+		msg := err.Error()
+		if strings.Contains(msg, "permission denied") {
+			msg += fmt.Sprintf("\nThe %s executable may not have the correct permissions.\nSee: https://gvisor.dev/docs/user_guide/faq/#i-m-getting-an-error-like-panic-unable-to-attach-operation-not-permitted-or-fork-exec-proc-self-exe-invalid-argument-unknown", os.Args[0])
+		}
+		return fmt.Errorf("Sandbox: %s", msg)
 	}
 	s.child = true
 	s.Pid = cmd.Process.Pid

@@ -15,6 +15,7 @@
 package ptrace
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -269,7 +270,11 @@ func (s *subprocess) newThread() *thread {
 // attach attaches to the thread.
 func (t *thread) attach() {
 	if _, _, errno := syscall.RawSyscall6(syscall.SYS_PTRACE, syscall.PTRACE_ATTACH, uintptr(t.tid), 0, 0, 0, 0); errno != 0 {
-		panic(fmt.Sprintf("unable to attach: %v", errno))
+		msg := fmt.Sprintf("unable to attach: %v", errno)
+		if errors.Is(errno, syscall.EPERM) {
+			msg += fmt.Sprintf("\nThe %s executable may not have the correct permissions.\nSee: https://gvisor.dev/docs/user_guide/faq/#i-m-getting-an-error-like-panic-unable-to-attach-operation-not-permitted-or-fork-exec-proc-self-exe-invalid-argument-unknown", os.Args[0])
+		}
+		panic(msg)
 	}
 
 	// PTRACE_ATTACH sends SIGSTOP, and wakes the tracee if it was already

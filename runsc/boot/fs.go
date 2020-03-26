@@ -643,7 +643,11 @@ func (c *containerMounter) mountSubmounts(ctx context.Context, conf *Config, mns
 			}
 		} else {
 			if err := c.mountSubmount(ctx, conf, mns, root, m); err != nil {
-				return fmt.Errorf("mount submount %q: %v", m.Destination, err)
+				msg := err.Error()
+				if strings.Contains(msg, "input/output error") || strings.Contains(msg, "broken pipe") {
+					msg += fmt.Sprintf("\nYou may be encountering a Linux kernel bug.\nSee: https://gvisor.dev/docs/user_guide/faq/#i-m-getting-an-error-like-mount-submount-etc-hostname-creating-mount-with-source-hostname-input-output-error-unknown")
+				}
+				return fmt.Errorf("mount submount %q: %s", m.Destination, msg)
 			}
 		}
 	}
