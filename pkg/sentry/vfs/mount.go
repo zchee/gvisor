@@ -16,6 +16,7 @@ package vfs
 
 import (
 	"math"
+	"sort"
 	"sync/atomic"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
@@ -23,6 +24,9 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/syserror"
 )
+
+// lastMountID is used to allocate mount ids. Must be accessed atomically.
+var lastMountID uint64
 
 // A Mount is a replacement of a Dentry (Mount.key.point) from one Filesystem
 // (Mount.key.parent.fs) with a Dentry (Mount.root) from another Filesystem
@@ -41,12 +45,15 @@ import (
 //
 // +stateify savable
 type Mount struct {
-	// vfs, fs, and root are immutable. References are held on fs and root.
+	// vfs, fs, root are immutable. References are held on fs and root.
 	//
 	// Invariant: root belongs to fs.
 	vfs  *VirtualFilesystem
 	fs   *Filesystem
 	root *Dentry
+
+	// ID is the immutable mount ID.
+	ID uint64
 
 	// key is protected by VirtualFilesystem.mountMu and
 	// VirtualFilesystem.mounts.seq, and may be nil. References are held on
@@ -87,6 +94,7 @@ type Mount struct {
 
 func newMount(vfs *VirtualFilesystem, fs *Filesystem, root *Dentry, mntns *MountNamespace, opts *MountOptions) *Mount {
 	mnt := &Mount{
+		ID:    atomic.AddUint64(&lastMountID, 1),
 		vfs:   vfs,
 		fs:    fs,
 		root:  root,
@@ -632,10 +640,61 @@ func (mnt *Mount) setReadOnlyLocked(ro bool) error {
 	return nil
 }
 
+// Root returns the Mount Root VirtualDentry with a reference taken.
+func (mnt *Mount) Root() VirtualDentry {
+	vd := VirtualDentry{
+		mount:  mnt,
+		dentry: mnt.root,
+	}
+	vd.IncRef()
+	return vd
+}
+
+// Parent returns the parent Mount with a reference taken, or nil if there is
+// no parent.
+func (mnt *Mount) Parent() *Mount {
+	p := mnt.parent()
+	if p != nil {
+		p.IncRef()
+	}
+	return p
+}
+
+// ChildMounts returns all Mounts that are descendents of this Mount, sorted by
+// ID. A reference is taken on all returned Mounts.
+func (mnt *Mount) ChildMounts() []*Mount {
+	mnt.vfs.mountMu.Lock()
+	defer mnt.vfs.mountMu.Unlock()
+	mnts := mnt.childMountsLocked()
+	sort.Slice(mnts, func(i, j int) bool { return mnts[i].ID < mnts[j].ID })
+	return mnts
+}
+
+// Precondition: mnt.vfs.mountMu must be held.
+func (mnt *Mount) childMountsLocked() []*Mount {
+	var mounts []*Mount
+	for m := range mnt.children {
+		m.IncRef()
+		mounts = append(mounts, m)
+		mounts = append(mounts, m.childMountsLocked()...)
+	}
+	return mounts
+}
+
 // Filesystem returns the mounted Filesystem. It does not take a reference on
 // the returned Filesystem.
 func (mnt *Mount) Filesystem() *Filesystem {
 	return mnt.fs
+}
+
+// Flags returns the mount flags.
+func (mnt *Mount) Flags() MountFlags {
+	return mnt.flags
+}
+
+// ReadOnly returns whether the mount is read only.
+func (mnt *Mount) ReadOnly() bool {
+	return atomic.LoadInt64(&mnt.writers) < 0
 }
 
 // Root returns mntns' root. A reference is taken on the returned
