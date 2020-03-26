@@ -21,6 +21,7 @@ import (
 
 	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/sentry/watchdog"
+	"gvisor.dev/gvisor/runsc/argument"
 )
 
 // FileAccessType tells how the filesystem is accessed.
@@ -36,6 +37,9 @@ const (
 	// the sandbox has exclusive access to the filesystem.
 	FileAccessExclusive
 )
+
+// ExtraBootArgs is a list of arguments that can be set the boot subcommand.
+var ExtraBootArgs = new([]argument.Argument)
 
 // MakeFileAccessType converts type from string.
 func MakeFileAccessType(s string) (FileAccessType, error) {
@@ -262,6 +266,9 @@ type Config struct {
 
 	// Enables VFS2 (not plumbled through yet).
 	VFS2 bool
+
+	// ExtraArgs is a list of other arguments that are not explicitly listed above.
+	ExtraArgs *[]argument.Argument
 }
 
 // ToFlags returns a slice of flags that correspond to the given Config.
